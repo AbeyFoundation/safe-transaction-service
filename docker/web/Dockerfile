@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1
 # `pysha3` is way faster than `pycryptodome` for CPython
 ENV ETH_HASH_BACKEND=pysha3
 
-COPY requirements.txt ./
+COPY requirements-abey.txt ./
 RUN set -ex \
 	&& buildDeps=" \
 		build-essential \
@@ -20,7 +20,8 @@ RUN set -ex \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends $buildDeps tmux postgresql-client \
     && pip install -U --no-cache-dir wheel setuptools pip \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements-abey.txt \
+    && pip install -e git+https://github.com/AbeyFoundation/safe-eth-py#egg=safe-eth-py[django]==6.0.0b35 \
     && apt-get purge -y --auto-remove $buildDeps \
     && rm -rf /var/lib/apt/lists/*
 
