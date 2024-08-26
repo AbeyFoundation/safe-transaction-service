@@ -156,7 +156,6 @@ def _clean_all_txs_cache(
 ) -> None:
     """
     Remove the all-transactions cache related with instance modified
-
     :param instance:
     """
     transaction_service = TransactionServiceProvider()

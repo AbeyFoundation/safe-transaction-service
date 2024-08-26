@@ -1,4 +1,3 @@
-import datetime
 import json
 import logging
 import pickle
@@ -8,7 +7,6 @@ from unittest.mock import MagicMock, PropertyMock
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.urls import reverse
-from django.utils import timezone
 
 import eth_abi
 from eth_account import Account
@@ -45,12 +43,10 @@ from ..models import (
     SafeMasterCopy,
 )
 from ..serializers import TransferType
-from ..services import TransactionServiceProvider
 from ..views import SafeMultisigTransactionListView
 from .factories import (
     ERC20TransferFactory,
     ERC721TransferFactory,
-    EthereumBlockFactory,
     EthereumTxFactory,
     InternalTxFactory,
     ModuleTransactionFactory,
@@ -271,38 +267,12 @@ class TestViews(SafeTestCaseMixin, APITestCase):
             MultisigTransactionFactory()
         )  # Should not appear, it's for another Safe
 
-        # Should not appear unless queued=True, nonce > last mined transaction
-        higher_nonce_safe_multisig_transaction = MultisigTransactionFactory(
-            safe=safe_address, ethereum_tx=None
-        )
-        higher_nonce_safe_multisig_transaction_2 = MultisigTransactionFactory(
-            safe=safe_address, ethereum_tx=None
-        )
+        # Should not appear as they are not executed
+        for _ in range(2):
+            MultisigTransactionFactory(safe=safe_address, ethereum_tx=None)
 
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=False&trusted=True"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 4)
-
-        response = self.client.get(
-            reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=True&trusted=True"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 4)
-
-        response = self.client.get(
-            reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=True&trusted=False"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 8)
-
-        response = self.client.get(
-            reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=False&trusted=False"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 6)
@@ -323,8 +293,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
 
         # Test pagination
         response = self.client.get(
-            reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?limit=3&queued=False&trusted=False"
+            reverse("v1:history:all-transactions", args=(safe_address,)) + "?limit=3"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 6)
@@ -332,7 +301,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
 
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?limit=4&offset=4&queued=False&trusted=False"
+            + "?limit=4&offset=4"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 6)
@@ -349,7 +318,6 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         )
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=False&trusted=False"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 6)
@@ -385,61 +353,55 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         # No mined
         MultisigTransactionFactory(safe=safe_address, ethereum_tx=None)
         MultisigTransactionFactory(safe=safe_address, ethereum_tx=None)
-        # Mine tx with higher nonce, all should appear
+        # Mined
         MultisigTransactionFactory(safe=safe_address)
 
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?executed=False&queued=True&trusted=False"
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 3)
-
-        response = self.client.get(
-            reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?executed=True&queued=True&trusted=False"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
 
     def test_all_transactions_ordering(self):
         safe_address = Account.create().address
-        block_2_days_ago = EthereumBlockFactory(
-            timestamp=timezone.now() - datetime.timedelta(days=2)
-        )
-        ethereum_tx_2_days_ago = EthereumTxFactory(block=block_2_days_ago)
+
         # Older transaction
-        MultisigTransactionFactory(
-            safe=safe_address, ethereum_tx=ethereum_tx_2_days_ago
-        )
-        # Earlier transactions
-        MultisigTransactionFactory(safe=safe_address)
-        MultisigTransactionFactory(safe=safe_address)
+        erc20_transfer = ERC20TransferFactory(to=safe_address)
+        # Newer transaction
+        multisig_transaction = MultisigTransactionFactory(safe=safe_address)
+
         # Nonce is not allowed as a sorting parameter
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
             + "?ordering=nonce"
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # By default, newer transactions first
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?trusted=False&ordering=execution_date"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 3)
-        first_result = response.data["results"][0]
+        self.assertEqual(response.data["count"], 2)
         self.assertEqual(
-            first_result["transaction_hash"], ethereum_tx_2_days_ago.tx_hash
+            response.data["results"][0]["transaction_hash"],
+            multisig_transaction.ethereum_tx_id,
+        )
+        self.assertEqual(
+            response.data["results"][1]["tx_hash"], erc20_transfer.ethereum_tx_id
         )
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?trusted=False&ordering=-execution_date"
+            + "?ordering=timestamp"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 3)
-        last_result = response.data["results"][2]
+        self.assertEqual(response.data["count"], 2)
         self.assertEqual(
-            last_result["transaction_hash"], ethereum_tx_2_days_ago.tx_hash
+            response.data["results"][0]["tx_hash"], erc20_transfer.ethereum_tx_id
+        )
+        self.assertEqual(
+            response.data["results"][1]["transaction_hash"],
+            multisig_transaction.ethereum_tx_id,
         )
 
     def test_all_transactions_cache_view(self):
@@ -451,8 +413,8 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         ]
         # all-txs:{safe_address}
         cache_hash_key = f"all-txs:{safe_address}"
-        # {executed}{queued}{trusted}:{limit}:{offset}:{ordering}
-        cache_query_field = "100:10:0:execution_date"
+        # {limit}:{offset}:{ordering}
+        cache_query_field = "10:0:timestamp"
         redis = get_redis()
         redis.unlink(cache_hash_key)
         cache_result = redis.hget(cache_hash_key, cache_query_field)
@@ -461,7 +423,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
 
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?executed=True&queued=False&trusted=False&ordering=execution_date"
+            + "?ordering=timestamp"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 2)
@@ -474,22 +436,28 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         self.assertEqual(cache_count, 2)
         for cache_value, factory_transaction in zip(cache_values, factory_transactions):
             self.assertEqual(
-                cache_value["safe_tx_hash"], factory_transaction.safe_tx_hash
-            )
-            self.assertEqual(cache_value["created"], factory_transaction.created)
-            self.assertEqual(
-                cache_value["execution_date"], factory_transaction.execution_date
+                cache_value.ethereum_tx.tx_hash, factory_transaction.ethereum_tx.tx_hash
             )
             self.assertEqual(
-                cache_value["block"], factory_transaction.ethereum_tx.block_id
+                cache_value.ethereum_tx.created, factory_transaction.ethereum_tx.created
             )
-            self.assertEqual(cache_value["safe_nonce"], factory_transaction.nonce)
+            self.assertEqual(
+                cache_value.ethereum_tx.execution_date,
+                factory_transaction.ethereum_tx.execution_date,
+            )
+            self.assertEqual(
+                cache_value.ethereum_tx.block.number,
+                factory_transaction.ethereum_tx.block_id,
+            )
+            self.assertEqual(
+                cache_value.ethereum_tx.nonce, factory_transaction.ethereum_tx.nonce
+            )
         # Modify cache to empty list
         redis.hset(cache_hash_key, cache_query_field, pickle.dumps(([], 0)))
         redis.expire(cache_hash_key, 60 * 10)
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?executed=True&queued=False&trusted=False&ordering=execution_date"
+            + "?ordering=timestamp"
         )
         # Response should be returned from cache
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -499,7 +467,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         MultisigTransactionFactory(safe=safe_address)
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?executed=True&queued=False&trusted=False&ordering=execution_date"
+            + "?ordering=timestamp"
         )
         self.assertEqual(response.data["count"], 3)
 
@@ -509,7 +477,6 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         """
         safe_address = "0x54f3c8e4Bf7bFDFF39B36d1FAE4e5ceBdD93C6A9"
         number_transactions = 100
-        transaction_service = TransactionServiceProvider()
         for _ in range(number_transactions):
             MultisigTransactionFactory(safe=safe_address)
 
@@ -517,14 +484,14 @@ class TestViews(SafeTestCaseMixin, APITestCase):
             with self.subTest(limit=limit, offset=offset):
                 # all-txs:{safe_address}
                 cache_hash_key = f"all-txs:{safe_address}"
-                # {executed}{queued}{trusted}:{limit}:{offset}:{ordering}:{relevant_elements}
-                cache_query_field = f"100:{limit}:{offset}:execution_date"
+                # {limit}:{offset}:{ordering}
+                cache_query_field = f"{limit}:{offset}:timestamp"
                 redis = get_redis()
                 self.assertFalse(redis.hexists(cache_hash_key, cache_query_field))
 
                 response = self.client.get(
                     reverse("v1:history:all-transactions", args=(safe_address,))
-                    + f"?executed=True&queued=False&trusted=False&ordering=execution_date&limit={limit}&offset={offset}"
+                    + f"?ordering=timestamp&limit={limit}&offset={offset}"
                 )
                 self.assertEqual(response.data["count"], number_transactions)
                 self.assertEqual(len(response.data["results"]), limit)
@@ -596,6 +563,36 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         self.assertIsNone(response.data["results"][0]["transfers"][0]["token_id"])
         self.assertEqual(response.data["results"][0]["transfers"][0]["value"], "0")
 
+    def test_all_transactions_duplicated_multisig_tx_view(self):
+        """
+        Test 2 module transactions with the same tx_hash
+        """
+        safe_address = Account.create().address
+        multisig_transaction_1 = MultisigTransactionFactory(safe=safe_address)
+        multisig_transaction_2 = MultisigTransactionFactory(
+            safe=safe_address,
+            ethereum_tx=multisig_transaction_1.ethereum_tx,
+        )
+
+        self.assertEqual(
+            multisig_transaction_1.ethereum_tx,
+            multisig_transaction_2.ethereum_tx,
+        )
+
+        response = self.client.get(
+            reverse("v1:history:all-transactions", args=(safe_address,))
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 2)
+        # We are aware of this. Pagination is done by `tx_hash`, so 2 transactions
+        # with the same `tx_hash` will return a `count` of 1
+        self.assertEqual(response.data["count"], 1)
+        # Even if they have the same `tx_hash`, tx with higher nonce will come first
+        self.assertEqual(
+            [multisig_transaction_2.safe_tx_hash, multisig_transaction_1.safe_tx_hash],
+            [multisig_tx["safe_tx_hash"] for multisig_tx in response.data["results"]],
+        )
+
     def test_all_transactions_duplicated_module_view(self):
         """
         Test 2 module transactions with the same tx_hash
@@ -614,10 +611,12 @@ class TestViews(SafeTestCaseMixin, APITestCase):
 
         response = self.client.get(
             reverse("v1:history:all-transactions", args=(safe_address,))
-            + "?queued=False&trusted=True"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data["results"]), response.data["count"], 2)
+        self.assertEqual(len(response.data["results"]), 2)
+        # We are aware of this. Pagination is done by `tx_hash`, so 2 transactions
+        # with the same `tx_hash` will return a `count` of 1
+        self.assertEqual(response.data["count"], 1)
         self.assertEqual(
             {module_transaction_1.module, module_transaction_2.module},
             {module_tx["module"] for module_tx in response.data["results"]},
