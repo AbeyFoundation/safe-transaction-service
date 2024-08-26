@@ -20,7 +20,7 @@ RUN set -ex \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends $buildDeps tmux postgresql-client \
     && pip install -U --no-cache-dir wheel setuptools pip \
-    && pip --no-cache-dir -r requirements-abey.txt \
+    && pip install --no-cache-dir -r requirements-abey.txt \
     && apt-get purge -y --auto-remove $buildDeps \
     && rm -rf /var/lib/apt/lists/*
 
